@@ -1,5 +1,8 @@
 #!/bin/bash
 # v4l-saver.sh: Save and load V4L2 device controls
+#
+# Copyright (c) 2025 v4l-saver contributors
+# Licensed under the MIT License. See LICENSE file for details.
 
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/v4l-saver"
 mkdir -p "$CONFIG_DIR"
