@@ -5,6 +5,7 @@ A comprehensive bash script for managing V4L2 (Video4Linux2) device controls. Sa
 ## Features
 
 - **Save/Load Controls**: Save camera settings to JSON configuration files and restore them later
+- **Reset Controls**: Reset camera controls to their factory defaults
 - **Device Listing**: Display all video devices in table or JSON format with detailed information
 - **Serial-based Identification**: Uses device serial numbers for reliable device matching across reboots
 - **Smart Filtering**: Only processes usable capture devices (skips unusable ones)
@@ -51,7 +52,7 @@ A comprehensive bash script for managing V4L2 (Video4Linux2) device controls. Sa
 ## Usage
 
 ```
-./v4l-saver.sh [--save|--load|--list|--json|--help] [device]
+./v4l-saver.sh [--save|--load|--reset|--list|--json|--help] [device]
 ```
 
 ### Command Line Options
@@ -60,6 +61,7 @@ A comprehensive bash script for managing V4L2 (Video4Linux2) device controls. Sa
 |--------|-------------|
 | `--save [device]` | Save controls for all or specific /dev/video* device to config directory (JSON format) |
 | `--load [device]` | Load controls for all or specific /dev/video* device from config directory (JSON format) |
+| `--reset [device]` | Reset controls for all or specific /dev/video* device to defaults |
 | `--list` | List available video devices in table format |
 | `--json` | List available video devices in JSON format |
 | `--help` | Show help message |
@@ -99,6 +101,15 @@ Using serial numbers is recommended as they remain consistent across reboots and
 
 # Load controls for a specific device by path
 ./v4l-saver.sh --load /dev/video0
+
+# Reset all devices to their default settings
+./v4l-saver.sh --reset
+
+# Reset a specific device by serial number to defaults
+./v4l-saver.sh --reset 1234ABCD
+
+# Reset a specific device by path to defaults
+./v4l-saver.sh --reset /dev/video0
 ```
 
 ## Output Examples
