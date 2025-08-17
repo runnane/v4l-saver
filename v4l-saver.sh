@@ -54,10 +54,67 @@ check_dependencies() {
     return 0
 }
 
+# Check if user has permissions to access video devices
+check_video_permissions() {
+    local example_device=""
+    
+    # Find the first video device for testing
+    for dev in /dev/video*; do
+        if [ -c "$dev" ]; then
+            example_device="$dev"
+            break
+        fi
+    done
+    
+    if [ -z "$example_device" ]; then
+        echo "Warning: No video devices found for permission testing" >&2
+        return 0
+    fi
+    
+    # Test if we can read from the device
+    if ! v4l2-ctl --device="$example_device" --info >/dev/null 2>&1; then
+        echo "Error: Cannot access video devices (permission denied)" >&2
+        echo "" >&2
+        echo "Your user '$USER' does not have permission to access video devices." >&2
+        echo "This is required to read/write V4L2 device controls." >&2
+        echo "" >&2
+        echo "Solutions:" >&2
+        echo "" >&2
+        echo "1. Add your user to the 'video' group (recommended):" >&2
+        echo "   sudo usermod -a -G video $USER" >&2
+        echo "   newgrp video  # Apply group immediately, or logout/login" >&2
+        echo "" >&2
+        echo "2. Alternative: Temporary access with sudo (not recommended):" >&2
+        echo "   sudo $0 [options]" >&2
+        echo "" >&2
+        echo "3. Check current group membership:" >&2
+        echo "   groups $USER" >&2
+        echo "   id $USER" >&2
+        echo "" >&2
+        echo "4. Check device permissions:" >&2
+        echo "   ls -la /dev/video*" >&2
+        echo "" >&2
+        echo "After adding to the video group, verify with:" >&2
+        echo "   v4l2-ctl --device=$example_device --info" >&2
+        echo "" >&2
+        return 1
+    fi
+    
+    # Check if user is in video group (informational)
+    if ! groups "$USER" 2>/dev/null | grep -q '\bvideo\b'; then
+        echo "Info: User '$USER' is not in the 'video' group, but device access works." >&2
+        echo "Consider adding to video group for consistent access: sudo usermod -a -G video $USER" >&2
+        echo "" >&2
+    fi
+    
+    return 0
+}
+
 usage() {
-    echo "Usage: $0 [--save|--load|--list|--json|--help] [device]"
+    echo "Usage: $0 [--save|--load|--reset|--list|--json|--help] [device]"
     echo "  --save [device]   Save controls for all or specific /dev/video* device to $CONFIG_DIR (JSON format)"
     echo "  --load [device]   Load controls for all or specific /dev/video* device from $CONFIG_DIR (JSON format)"
+    echo "  --reset [device]  Reset controls for all or specific /dev/video* device to defaults"
     echo "  --list            List available video devices in table format"
     echo "  --json            List available video devices in JSON format"
     echo "  --help            Show this help message"
@@ -70,6 +127,7 @@ usage() {
     echo "  $0 --save                 # Save all usable devices"
     echo "  $0 --save /dev/video0     # Save specific device"
     echo "  $0 --load 1234ABCD        # Load device with serial 1234ABCD"
+    echo "  $0 --reset /dev/video0    # Reset specific device to defaults"
 }
 
 # Check if device is usable (has formats and resolutions)
@@ -419,21 +477,19 @@ save_controls() {
                     # Look for this specific control in the output
                     ctrl_line=$(echo "$controls_output" | grep -E "^\s+${ctrl}\s+")
                     if [ -n "$ctrl_line" ]; then
-                        val=$(echo "$ctrl_line" | awk '{print $3}')
-                        ctrl_type=$(echo "$ctrl_line" | awk '{print $2}' | tr -d '()')
+                        # Extract value=X from the line (handle both positive and negative numbers)
+                        val=$(echo "$ctrl_line" | sed -n 's/.*value=\([0-9-]*\).*/\1/p')
+                        # Extract type (int), (bool), (menu) etc.
+                        ctrl_type=$(echo "$ctrl_line" | sed -n 's/.*(\([^)]*\)).*/\1/p')
                         
-                        if [ -n "$val" ]; then
+                        if [ -n "$val" ] && [ -n "$ctrl_type" ]; then
                             if [ "$first_ctrl" = false ]; then
                                 echo ","
                             fi
                             first_ctrl=false
                             
-                            # Determine if value is numeric
-                            if echo "$val" | grep -qE '^-?[0-9]+$'; then
-                                printf "    \"$ctrl\": {\"value\": $val, \"type\": \"$ctrl_type\"}"
-                            else
-                                printf "    \"$ctrl\": {\"value\": \"$(escape_json "$val")\", \"type\": \"$ctrl_type\"}"
-                            fi
+                            # All V4L2 values are numeric, so save as numbers
+                            printf "    \"$ctrl\": {\"value\": $val, \"type\": \"$ctrl_type\"}"
                         fi
                     fi
                 done
@@ -613,8 +669,162 @@ load_controls() {
     done
 }
 
+reset_controls() {
+    local target_device="$1"
+    
+    # Define the controls we want to reset (same as save/load)
+    local allowed_controls=(
+        "brightness"
+        "contrast"
+        "saturation"
+        "white_balance_automatic"
+        "gain"
+        "power_line_frequency"
+        "white_balance_temperature"
+        "sharpness"
+        "backlight_compensation"
+        "auto_exposure"
+        "exposure_time_absolute"
+        "exposure_dynamic_framerate"
+        "pan_absolute"
+        "tilt_absolute"
+        "focus_absolute"
+        "focus_automatic_continuous"
+        "zoom_absolute"
+    )
+    
+    # Determine devices to process
+    local devices_to_process=""
+    
+    if [ -n "$target_device" ]; then
+        # Check if target_device is a device path or serial number
+        if [[ "$target_device" =~ ^/dev/video[0-9]+$ ]]; then
+            # It's a device path
+            if [ -c "$target_device" ]; then
+                devices_to_process="$target_device"
+            else
+                echo "Error: Device $target_device not found"
+                return 1
+            fi
+        else
+            # It's probably a serial number
+            local found_device
+            found_device=$(find_device_by_serial "$target_device")
+            if [ -n "$found_device" ]; then
+                devices_to_process="$found_device"
+                echo "Found device $found_device for serial number $target_device"
+            else
+                echo "Error: No device found with serial number $target_device"
+                return 1
+            fi
+        fi
+    else
+        # Process all devices
+        devices_to_process=$(ls /dev/video* 2>/dev/null | tr '\n' ' ')
+    fi
+    
+    for dev in $devices_to_process; do
+        if [ -c "$dev" ]; then
+            # Skip unusable devices
+            if ! is_device_usable "$dev"; then
+                echo "Skipping $dev (device is not usable for capture)"
+                continue
+            fi
+            
+            # Get device info
+            info=$(v4l2-ctl --device="$dev" --info)
+            serial=$(echo "$info" | grep -i 'Serial' | awk -F': ' '{print $2}')
+            card=$(echo "$info" | grep -i 'Card type' | awk -F': ' '{print $2}')
+            
+            echo "Resetting $dev to defaults"
+            [ -n "$serial" ] && echo "  Device: $(echo "$card" | cut -c1-40) (SN: $serial)" || echo "  Device: $(echo "$card" | cut -c1-40)"
+            
+            # Get current controls to see what's available
+            controls_output=$(v4l2-ctl --device="$dev" --all 2>/dev/null)
+            
+            reset_count=0
+            failed_count=0
+            
+            for ctrl in "${allowed_controls[@]}"; do
+                # Look for this specific control in the output to see if it exists
+                ctrl_line=$(echo "$controls_output" | grep -E "^\s+${ctrl}\s+")
+                if [ -n "$ctrl_line" ]; then
+                    # Extract default value if available
+                    default_val=$(echo "$ctrl_line" | grep -o 'default=[0-9-]*' | cut -d'=' -f2)
+                    
+                    if [ -n "$default_val" ]; then
+                        echo "  Setting $ctrl=$default_val (default)"
+                        if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=$default_val" 2>/dev/null; then
+                            ((reset_count++))
+                        else
+                            echo "    Warning: Failed to set $ctrl to default"
+                            ((failed_count++))
+                        fi
+                    else
+                        # If no default available, try common defaults based on control type
+                        case "$ctrl" in
+                            "brightness"|"contrast"|"saturation"|"sharpness"|"gain")
+                                # Common default for these is often 128 (middle value)
+                                echo "  Setting $ctrl=128 (estimated default)"
+                                if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=128" 2>/dev/null; then
+                                    ((reset_count++))
+                                else
+                                    ((failed_count++))
+                                fi
+                                ;;
+                            "white_balance_automatic"|"focus_automatic_continuous"|"backlight_compensation")
+                                # Boolean controls - try auto=1 as default
+                                echo "  Setting $ctrl=1 (auto enabled)"
+                                if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=1" 2>/dev/null; then
+                                    ((reset_count++))
+                                else
+                                    ((failed_count++))
+                                fi
+                                ;;
+                            "auto_exposure")
+                                # Auto exposure - usually mode 3 (aperture priority) or 1 (manual)
+                                echo "  Setting $ctrl=3 (aperture priority mode)"
+                                if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=3" 2>/dev/null; then
+                                    ((reset_count++))
+                                else
+                                    echo "    Trying $ctrl=1 (manual mode)"
+                                    if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=1" 2>/dev/null; then
+                                        ((reset_count++))
+                                    else
+                                        ((failed_count++))
+                                    fi
+                                fi
+                                ;;
+                            "power_line_frequency")
+                                # Power line frequency - try 1 (50Hz) or 2 (60Hz) based on locale
+                                echo "  Setting $ctrl=1 (50Hz - change to 2 for 60Hz regions)"
+                                if v4l2-ctl --device="$dev" --set-ctrl="$ctrl=1" 2>/dev/null; then
+                                    ((reset_count++))
+                                else
+                                    ((failed_count++))
+                                fi
+                                ;;
+                            *)
+                                echo "  Skipping $ctrl (no known default)"
+                                ;;
+                        esac
+                    fi
+                fi
+            done
+            
+            echo "  Reset $reset_count controls successfully"
+            [ $failed_count -gt 0 ] && echo "  Failed to reset $failed_count controls"
+        fi
+    done
+}
+
 # Check dependencies before proceeding
 if ! check_dependencies; then
+    exit 1
+fi
+
+# Check video device permissions
+if ! check_video_permissions; then
     exit 1
 fi
 
@@ -624,6 +834,9 @@ case "$1" in
         ;;
     --load)
         load_controls "$2"
+        ;;
+    --reset)
+        reset_controls "$2"
         ;;
     --list)
         list_devices
